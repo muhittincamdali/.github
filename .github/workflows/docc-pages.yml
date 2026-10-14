@@ -49,6 +49,13 @@ on:
         description: Deploy to Pages. Pass false on pull requests to only build.
         type: boolean
         default: true
+      skip-synthesized-members:
+        description: >-
+          Leave out members a type only inherits from protocol extensions, such as the hundreds of
+          SwiftUI View modifiers every view gets. A package with many views otherwise produces a
+          site too large for GitHub Pages.
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -82,12 +89,14 @@ jobs:
           TARGETS: ${{ inputs.targets }}
           SCHEME: ${{ inputs.scheme }}
           DESTINATION: ${{ inputs.destination }}
+          SKIP_SYNTHESIZED: ${{ inputs.skip-synthesized-members && 'YES' || 'NO' }}
         run: |
           set -o pipefail
           read -r -a targets <<< "$TARGETS"
           scheme="${SCHEME:-${targets[0]}}"
           xcodebuild docbuild -scheme "$scheme" -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/docc" -skipPackagePluginValidation -skipMacroValidation -quiet
+            -derivedDataPath "$RUNNER_TEMP/docc" -skipPackagePluginValidation -skipMacroValidation -quiet \
+            DOCC_SKIP_SYNTHESIZED_MEMBERS="$SKIP_SYNTHESIZED"
           mkdir -p "$RUNNER_TEMP/archives"
           for target in "${targets[@]}"; do
             archive=$(find "$RUNNER_TEMP/docc/Build/Products" -type d -name "${target}.doccarchive" | head -n 1)
