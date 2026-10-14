@@ -1,0 +1,97 @@
+name: Flutter CI
+
+# Reusable: format check, static analysis and tests for a Flutter app or package.
+#
+#   jobs:
+#     flutter:
+#       uses: muhittincamdali/.github/.github/workflows/flutter-ci.yml@<sha> # v1
+
+on:
+  workflow_call:
+    inputs:
+      flutter-version:
+        description: Exact Flutter version, e.g. "3.35.0". Empty takes the latest release of `channel`.
+        type: string
+        default: ""
+      channel:
+        type: string
+        default: stable
+      working-directory:
+        type: string
+        default: "."
+      check-format:
+        type: boolean
+        default: true
+      coverage:
+        description: Collect coverage and upload coverage/lcov.info as an artifact.
+        type: boolean
+        default: true
+      publish-dry-run:
+        description: Run `dart pub publish --dry-run` (packages published to pub.dev).
+        type: boolean
+        default: false
+      runs-on:
+        type: string
+        default: ubuntu-24.04
+
+permissions: {}
+
+concurrency:
+  group: reusable-flutter-ci-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  flutter:
+    name: Analyze and test
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: ${{ inputs.channel }}
+          flutter-version: ${{ inputs.flutter-version }}
+          cache: true
+
+      - name: Toolchain
+        run: flutter --version
+
+      - name: Dependencies
+        run: flutter pub get
+
+      - name: Format
+        if: inputs.check-format
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        env:
+          COVERAGE: ${{ inputs.coverage }}
+        run: |
+          if [ ! -d test ]; then
+            echo "::notice::No test directory"
+            exit 0
+          fi
+          if [ "$COVERAGE" = "true" ]; then flutter test --coverage; else flutter test; fi
+
+      - name: Upload coverage
+        if: inputs.coverage && hashFiles(format('{0}/coverage/lcov.info', inputs.working-directory)) != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: ${{ inputs.working-directory }}/coverage/lcov.info
+          retention-days: 14
+
+      - name: Publish dry run
+        if: inputs.publish-dry-run
+        run: dart pub publish --dry-run
