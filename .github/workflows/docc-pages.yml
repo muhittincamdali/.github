@@ -1,0 +1,143 @@
+name: DocC to GitHub Pages
+
+# Reusable: builds DocC documentation with xcodebuild (no swift-docc-plugin dependency needed),
+# turns it into a static site and deploys it to GitHub Pages. The repository's Pages source must be
+# "GitHub Actions" (Settings › Pages). Caller:
+#
+#   permissions:
+#     contents: read
+#     pages: write
+#     id-token: write
+#   jobs:
+#     docs:
+#       uses: muhittincamdali/.github/.github/workflows/docc-pages.yml@<sha> # v1
+#       with:
+#         targets: MyLibrary
+#         deploy: ${{ github.event_name != 'pull_request' }}
+
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: Space-separated documentation targets (module names). Several targets are merged into one site.
+        type: string
+        required: true
+      scheme:
+        description: xcodebuild scheme. Empty uses the first target.
+        type: string
+        default: ""
+      destination:
+        description: Build destination for docbuild. Use 'generic/platform=iOS Simulator' for iOS-only packages.
+        type: string
+        default: generic/platform=macOS
+      runner:
+        description: Runner label. macos-26 is GitHub's generally available macOS image (Xcode 26.x).
+        type: string
+        default: macos-26
+      xcode:
+        description: Xcode version to select, e.g. "26.6". Empty keeps the image default.
+        type: string
+        default: ""
+      working-directory:
+        type: string
+        default: "."
+      hosting-base-path:
+        description: Path the site is served under. Empty uses the repository name (https://<owner>.github.io/<repo>/).
+        type: string
+        default: ""
+      deploy:
+        description: Deploy to Pages. Pass false on pull requests to only build.
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: reusable-docc-pages-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build documentation
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        if: inputs.xcode != ''
+        env:
+          XCODE_VERSION: ${{ inputs.xcode }}
+        run: sudo xcode-select --switch "/Applications/Xcode_${XCODE_VERSION}.app"
+
+      - name: Build DocC archives
+        env:
+          TARGETS: ${{ inputs.targets }}
+          SCHEME: ${{ inputs.scheme }}
+          DESTINATION: ${{ inputs.destination }}
+        run: |
+          set -o pipefail
+          read -r -a targets <<< "$TARGETS"
+          scheme="${SCHEME:-${targets[0]}}"
+          xcodebuild docbuild -scheme "$scheme" -destination "$DESTINATION" \
+            -derivedDataPath "$RUNNER_TEMP/docc" -skipPackagePluginValidation -skipMacroValidation -quiet
+          mkdir -p "$RUNNER_TEMP/archives"
+          for target in "${targets[@]}"; do
+            archive=$(find "$RUNNER_TEMP/docc/Build/Products" -type d -name "${target}.doccarchive" | head -n 1)
+            if [ -z "$archive" ]; then
+              echo "::error::No DocC archive for target '$target'"
+              exit 1
+            fi
+            cp -R "$archive" "$RUNNER_TEMP/archives/"
+          done
+
+      - name: Transform for static hosting
+        env:
+          TARGETS: ${{ inputs.targets }}
+          BASE_PATH: ${{ inputs.hosting-base-path || github.event.repository.name }}
+        run: |
+          read -r -a targets <<< "$TARGETS"
+          site="$RUNNER_TEMP/site"
+          if [ "${#targets[@]}" -gt 1 ]; then
+            archives=()
+            for target in "${targets[@]}"; do archives+=("$RUNNER_TEMP/archives/${target}.doccarchive"); done
+            xcrun docc merge "${archives[@]}" --output-path "$RUNNER_TEMP/merged.doccarchive"
+            source_archive="$RUNNER_TEMP/merged.doccarchive"
+            landing="documentation/"
+          else
+            source_archive="$RUNNER_TEMP/archives/${targets[0]}.doccarchive"
+            landing="documentation/$(printf '%s' "${targets[0]}" | tr '[:upper:]' '[:lower:]')/"
+          fi
+          xcrun docc process-archive transform-for-static-hosting "$source_archive" \
+            --output-path "$site" --hosting-base-path "$BASE_PATH"
+          printf '<!doctype html><meta charset="utf-8"><title>Documentation</title><meta http-equiv="refresh" content="0; url=%s"><link rel="canonical" href="%s"><a href="%s">Documentation</a>\n' \
+            "$landing" "$landing" "$landing" > "$site/index.html"
+          touch "$site/.nojekyll"
+          echo "Landing page: /$BASE_PATH/$landing" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: inputs.deploy
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
