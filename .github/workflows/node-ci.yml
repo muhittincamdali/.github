@@ -1,0 +1,96 @@
+name: Node CI
+
+# Reusable: install with the repository's own lockfile (npm or pnpm), then run the `lint`,
+# `typecheck`, `test` and `build` scripts that exist, on each Node.js version given.
+#
+#   jobs:
+#     node:
+#       uses: muhittincamdali/.github/.github/workflows/node-ci.yml@<sha> # v1
+#       with:
+#         node-versions: '["22", "24"]'
+
+on:
+  workflow_call:
+    inputs:
+      node-versions:
+        description: JSON list of Node.js versions.
+        type: string
+        default: '["22", "24"]'
+      working-directory:
+        type: string
+        default: "."
+      scripts:
+        description: Space-separated package scripts to run when present.
+        type: string
+        default: lint typecheck test build
+      runs-on:
+        type: string
+        default: ubuntu-24.04
+
+permissions: {}
+
+concurrency:
+  group: reusable-node-ci-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  node:
+    name: Node ${{ matrix.node }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(inputs.node-versions) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Package manager
+        id: pm
+        run: |
+          if [ -f pnpm-lock.yaml ]; then echo "name=pnpm" >> "$GITHUB_OUTPUT"
+          elif [ -f package-lock.json ]; then echo "name=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Commit a lockfile (package-lock.json or pnpm-lock.yaml) so installs are reproducible"
+            exit 1
+          fi
+
+      - name: Set up pnpm
+        if: steps.pm.outputs.name == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ${{ inputs.working-directory }}/package.json
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: ${{ steps.pm.outputs.name }}
+          cache-dependency-path: ${{ inputs.working-directory }}/${{ steps.pm.outputs.name == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
+
+      - name: Install
+        env:
+          PM: ${{ steps.pm.outputs.name }}
+        run: |
+          if [ "$PM" = "pnpm" ]; then pnpm install --frozen-lockfile
+          else npm ci --no-audit --no-fund
+          fi
+
+      - name: Scripts
+        env:
+          PM: ${{ steps.pm.outputs.name }}
+          SCRIPTS: ${{ inputs.scripts }}
+        run: |
+          for script in $SCRIPTS; do
+            if SCRIPT="$script" node -e "process.exit(require('./package.json').scripts?.[process.env.SCRIPT] ? 0 : 1)"; then
+              echo "::group::$script"
+              "$PM" run "$script"
+              echo "::endgroup::"
+            fi
+          done
