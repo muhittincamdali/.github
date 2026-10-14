@@ -1,0 +1,86 @@
+name: Links
+
+# Reusable: checks every link and every #anchor in the repository's Markdown and HTML with lychee.
+# Uses the repository's .lychee.toml, or the shared default below when there is none. Results are
+# cached for a day, so a weekly schedule plus pull requests stays fast. Caller:
+#
+#   on:
+#     pull_request:
+#     schedule:
+#       - cron: "23 5 * * 1"
+#   jobs:
+#     links:
+#       uses: muhittincamdali/.github/.github/workflows/links.yml@<sha> # v1
+
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: Space-separated globs to check (quoted for lychee).
+        type: string
+        default: "'./**/*.md' './**/*.html'"
+      fail:
+        description: Fail the job when a link is broken.
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: reusable-links-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lychee:
+    name: Check links
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Default settings
+        run: |
+          if [ -f .lychee.toml ]; then
+            echo "Using the repository's .lychee.toml"
+            exit 0
+          fi
+          cat > .lychee.toml <<'TOML'
+          cache = true
+          max_cache_age = "1d"
+          cache_exclude_status = "429, 500.."
+          max_concurrency = 8
+          max_retries = 3
+          timeout = 20
+          include_fragments = "anchor-only"
+          accept = ["200..=299", "403", "429"]
+          exclude_loopback = true
+          exclude_private = true
+          exclude_link_local = true
+          exclude = [
+            '^https://(www\.)?linkedin\.com/',
+            '^https://(www\.)?x\.com/',
+            '^https?://(www\.)?example\.(com|org|net)',
+            '^https?://api\.example\.com',
+            '^https://github\.com/[^/]+/[^/]+/compare/',
+          ]
+          exclude_path = ["node_modules", ".build", "build", "Pods"]
+          TOML
+
+      - name: Restore link cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lycheecache
+          key: lychee-${{ github.sha }}
+          restore-keys: lychee-
+
+      - name: Check
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --config .lychee.toml --no-progress ${{ inputs.paths }}
+          fail: ${{ inputs.fail }}
+          jobSummary: true
+          token: ${{ github.token }}
