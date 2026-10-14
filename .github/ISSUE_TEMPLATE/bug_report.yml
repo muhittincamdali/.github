@@ -1,0 +1,83 @@
+name: Bug report
+description: Something does not work as documented.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please search the existing issues first; for security problems use the
+        repository's Security tab instead (see SECURITY.md).
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: A short description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest code or the exact steps that show the problem.
+      placeholder: |
+        1. Add the package to a new app
+        2. Show `ExampleView()` inside a `NavigationStack`
+        3. Rotate the device
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or commit you are using.
+      placeholder: 1.2.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options:
+        - iOS
+        - iPadOS
+        - macOS
+        - tvOS
+        - watchOS
+        - visionOS
+        - Android
+        - Web
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: toolchain
+    attributes:
+      label: Toolchain and OS version
+      description: For example "Xcode 26.4, iOS 26.4 simulator", "Flutter 3.35.0" or "Node.js 24.1".
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Error output, crash logs or screenshots. Logs are formatted as code automatically.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: I can reproduce this with the latest release.
+          required: false
