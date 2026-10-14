@@ -1,0 +1,180 @@
+name: Hygiene
+
+# Reusable: fails when tracked files or the commits being pushed contain tool names, unverifiable
+# superlatives or retired slogans. Words are written with a character class (e.g. "w[o]rd") so this
+# file never matches itself.
+#
+# Two tiers:
+#   - every tracked text file: tool names, generation notes, superlatives, retired slogans;
+#   - prose only (.md, .txt, .html, DocC): words that are normal in code but claims in prose.
+#
+# A legitimate hit (a quoted error message, a vendored file) goes into .github/hygiene-allow.txt:
+# one regular expression per line, matched against "path:line: text".
+#
+#   jobs:
+#     hygiene:
+#       uses: muhittincamdali/.github/.github/workflows/hygiene.yml@<sha> # v1
+
+on:
+  workflow_call:
+    inputs:
+      exclude:
+        description: Newline-separated glob patterns of paths to skip.
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: reusable-hygiene-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  scan:
+    name: Scan files and commits
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Scan
+        env:
+          EXCLUDE: ${{ inputs.exclude }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        shell: python3 -I {0}
+        run: |
+          import fnmatch, os, re, subprocess, sys
+
+          FLAGS = re.IGNORECASE
+          STRICT = [
+              (r"\bcl[a]ude\b", "tool name"),
+              (r"\bc[o]pilot\b", "tool name"),
+              (r"\bch[a]t-?gpt\b", "tool name"),
+              (r"\bgenerated (?:by|with)\b", "generation note"),
+              (r"\bworld[- ]cl[a]ss\b", "superlative"),
+              (r"\bunified c[o]re\b", "retired slogan"),
+              (r"\bendless m[a]rch\b", "retired slogan"),
+              (r"\bp[u]rif(?:y|ied|ies|ying|ication)\b", "retired slogan"),
+          ]
+          PROSE = [
+              (r"\bc[u]rsor\b", "tool name"),
+              (r"\b(?:the|is|ranked|rank|number)\s+#1\b|(?<![\w/])#1\s+(?:in|on|for|choice|library|framework|tool|solution)\b", "ranking claim"),
+              # Not a CSS or attribute value: "width: 100%;", width="100%", style="height:100%".
+              (r"(?<![\w.:=\"'])(?<![:=]\s)100\s?%(?!\s*[;\"'])", "absolute claim"),
+          ]
+          COMMITS = STRICT + PROSE[:1] + [(r"noreply@an[t]hropic\.com", "tool trailer")]
+          PROSE_EXTENSIONS = (".md", ".markdown", ".txt", ".rst", ".html", ".htm", ".adoc", ".tutorial")
+          HTML_EXTENSIONS = (".html", ".htm")
+          # Prose rules read the text a visitor sees: tags (with their attributes) are removed, and in
+          # HTML files so are <style> and <script> blocks.
+          TAG = re.compile(r"<[A-Za-z/!][^>]*>")
+          BLOCK_OPEN = re.compile(r"<(style|script)\b", FLAGS)
+          ALWAYS_SKIP = ["*.lock", "package-lock.json", "pnpm-lock.yaml", "Package.resolved", "*.pbxproj"]
+
+          def compile(rules):
+              return [(re.compile(pattern, FLAGS), label) for pattern, label in rules]
+
+          strict, prose, commits = compile(STRICT), compile(PROSE), compile(COMMITS)
+          excludes = ALWAYS_SKIP + [p.strip() for p in os.environ["EXCLUDE"].splitlines() if p.strip()]
+          allow = []
+          if os.path.exists(".github/hygiene-allow.txt"):
+              with open(".github/hygiene-allow.txt", encoding="utf-8") as handle:
+                  allow = [re.compile(l.strip()) for l in handle if l.strip() and not l.startswith("#")]
+
+          findings = []
+
+          def escape(value, prop=False):
+              value = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              return value.replace(":", "%3A").replace(",", "%2C") if prop else value
+
+          def report(where, line, text, label):
+              entry = f"{where}:{line}: {text.strip()[:160]}"
+              if any(rule.search(entry) for rule in allow):
+                  return
+              findings.append((where, line, label, text.strip()[:160]))
+
+          def visible_text(text, hidden):
+              """One HTML line without tags and <style>/<script> content; hidden carries an open block to the next line."""
+              parts, position = [], 0
+              while position < len(text):
+                  if hidden:
+                      end = re.compile(rf"</{hidden}\s*>", FLAGS).search(text, position)
+                      if not end:
+                          break
+                      position, hidden = end.end(), None
+                      continue
+                  opening = BLOCK_OPEN.search(text, position)
+                  parts.append(text[position : opening.start() if opening else len(text)])
+                  if not opening:
+                      break
+                  hidden, position = opening.group(1).lower(), opening.end()
+              return TAG.sub(" ", "".join(parts)), hidden
+
+          files = subprocess.run(["git", "ls-files", "-z"], capture_output=True, check=True).stdout.decode().split("\0")
+          for path in filter(None, files):
+              if any(fnmatch.fnmatch(path, p) or fnmatch.fnmatch(os.path.basename(path), p) for p in excludes):
+                  continue
+              try:
+                  with open(path, "rb") as handle:
+                      data = handle.read()
+              except (IsADirectoryError, FileNotFoundError):
+                  continue
+              if b"\0" in data[:8192]:
+                  continue
+              is_prose = path.lower().endswith(PROSE_EXTENSIONS)
+              is_html = path.lower().endswith(HTML_EXTENSIONS)
+              hidden = None
+              for number, text in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+                  for rule, label in strict:
+                      if rule.search(text):
+                          report(path, number, text, label)
+                  if not is_prose:
+                      continue
+                  visible, hidden = visible_text(text, hidden) if is_html else (TAG.sub(" ", text), None)
+                  for rule, label in prose:
+                      if rule.search(visible):
+                          report(path, number, text, label)
+
+          event = os.environ["EVENT"]
+          if event == "pull_request":
+              span = f'{os.environ["PR_BASE"]}..{os.environ["PR_HEAD"]}'
+          elif event == "push" and os.environ["PUSH_BEFORE"].strip("0"):
+              span = f'{os.environ["PUSH_BEFORE"]}..{os.environ["PUSH_AFTER"]}'
+          else:
+              span = None
+          if span:
+              log = subprocess.run(["git", "log", "--format=%H%x00%B%x1e", span], capture_output=True, text=True)
+              for record in filter(str.strip, log.stdout.split("\x1e")):
+                  sha, _, message = record.strip().partition("\0")
+                  for number, text in enumerate(message.splitlines(), 1):
+                      for rule, label in commits:
+                          if rule.search(text):
+                              report(f"commit {sha[:12]}", number, text, label)
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          lines = ["## Hygiene", ""]
+          if findings:
+              lines += ["| Where | Line | Finding | Text |", "| --- | --- | --- | --- |"]
+              for where, line, label, text in findings:
+                  safe = text.replace("|", "\\|")
+                  lines.append(f"| `{where}` | {line} | {label} | {safe} |")
+                  if not where.startswith("commit "):
+                      print(f"::error file={escape(where, True)},line={line}::{label}: {escape(text)}")
+                  else:
+                      print(f"::error::{where} line {line}: {label}: {escape(text)}")
+          else:
+              lines.append("No findings.")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("\n".join(lines) + "\n")
+          print(f"{len(findings)} finding(s)")
+          sys.exit(1 if findings else 0)
