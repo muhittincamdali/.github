@@ -1,0 +1,171 @@
+name: Swift CI
+
+# Reusable: builds and tests a Swift package with SwiftPM, then (optionally) builds it for each
+# Apple platform with xcodebuild. Call it from a repository's ci.yml:
+#
+#   jobs:
+#     swift:
+#       uses: muhittincamdali/.github/.github/workflows/swift-ci.yml@<sha> # v1
+#       with:
+#         platforms: '["iOS", "macOS", "tvOS", "watchOS", "visionOS"]'
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label. macos-26 is GitHub's generally available macOS image (Xcode 26.x); use a newer image only once it leaves preview.
+        type: string
+        default: macos-26
+      xcode:
+        description: Xcode version to select, e.g. "26.6" for /Applications/Xcode_26.6.app. Empty keeps the image default.
+        type: string
+        default: ""
+      working-directory:
+        description: Directory that holds Package.swift.
+        type: string
+        default: "."
+      test:
+        description: Run `swift test`. Turn off only for packages without a test target.
+        type: boolean
+        default: true
+      swift-test-flags:
+        description: Extra flags for `swift test`.
+        type: string
+        default: "--parallel"
+      platforms:
+        description: JSON list of platforms to build with xcodebuild (iOS, macOS, macCatalyst, tvOS, watchOS, visionOS). "[]" skips the job.
+        type: string
+        default: "[]"
+      scheme:
+        description: xcodebuild scheme. Empty picks the package's "-Package" scheme or its only scheme.
+        type: string
+        default: ""
+      test-on-simulator:
+        description: Also run the tests on an iOS simulator (iOS entry of `platforms` only).
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: reusable-swift-ci-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  package:
+    name: SwiftPM build and test
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        if: inputs.xcode != ''
+        env:
+          XCODE_VERSION: ${{ inputs.xcode }}
+        run: sudo xcode-select --switch "/Applications/Xcode_${XCODE_VERSION}.app"
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ inputs.working-directory }}/.build
+          key: spm-${{ inputs.runner }}-${{ inputs.xcode }}-${{ hashFiles(format('{0}/Package.swift', inputs.working-directory), format('{0}/Package.resolved', inputs.working-directory)) }}
+          restore-keys: spm-${{ inputs.runner }}-${{ inputs.xcode }}-
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        if: inputs.test
+        env:
+          TEST_FLAGS: ${{ inputs.swift-test-flags }}
+        run: |
+          # TEST_FLAGS is split into words on purpose.
+          # shellcheck disable=SC2086
+          swift test --skip-build $TEST_FLAGS
+
+  platforms:
+    name: xcodebuild ${{ matrix.platform }}
+    if: inputs.platforms != '[]'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(inputs.platforms) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        if: inputs.xcode != ''
+        env:
+          XCODE_VERSION: ${{ inputs.xcode }}
+        run: sudo xcode-select --switch "/Applications/Xcode_${XCODE_VERSION}.app"
+
+      - name: Resolve scheme and destination
+        id: target
+        env:
+          SCHEME: ${{ inputs.scheme }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [ -z "$SCHEME" ]; then
+            schemes=$(xcodebuild -list -json | jq -r '(.workspace // .project).schemes[]')
+            SCHEME=$(printf '%s\n' "$schemes" | grep -- '-Package$' | head -n 1 || true)
+            if [ -z "$SCHEME" ]; then
+              SCHEME=$(printf '%s\n' "$schemes" | head -n 1)
+            fi
+          fi
+          case "$PLATFORM" in
+            iOS) destination='generic/platform=iOS Simulator' ;;
+            tvOS) destination='generic/platform=tvOS Simulator' ;;
+            watchOS) destination='generic/platform=watchOS Simulator' ;;
+            visionOS) destination='generic/platform=visionOS Simulator' ;;
+            macOS) destination='platform=macOS' ;;
+            macCatalyst) destination='platform=macOS,variant=Mac Catalyst' ;;
+            *) echo "::error::Unknown platform '$PLATFORM'"; exit 1 ;;
+          esac
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "destination=$destination" >> "$GITHUB_OUTPUT"
+          echo "Scheme: $SCHEME, destination: $destination"
+
+      - name: Build
+        env:
+          SCHEME: ${{ steps.target.outputs.scheme }}
+          DESTINATION: ${{ steps.target.outputs.destination }}
+        run: |
+          set -o pipefail
+          xcodebuild build -scheme "$SCHEME" -destination "$DESTINATION" \
+            -skipPackagePluginValidation -skipMacroValidation CODE_SIGNING_ALLOWED=NO -quiet
+
+      - name: Test on an iOS simulator
+        if: inputs.test-on-simulator && matrix.platform == 'iOS'
+        env:
+          SCHEME: ${{ steps.target.outputs.scheme }}
+        run: |
+          set -o pipefail
+          udid=$(xcrun simctl list devices available --json \
+            | jq -r '[.devices | to_entries[] | select(.key | test("iOS")) | .value[] | select(.name | startswith("iPhone"))] | last | .udid')
+          if [ -z "$udid" ] || [ "$udid" = "null" ]; then
+            echo "::error::No available iPhone simulator on this image"
+            exit 1
+          fi
+          xcodebuild test -scheme "$SCHEME" -destination "id=$udid" \
+            -skipPackagePluginValidation -skipMacroValidation CODE_SIGNING_ALLOWED=NO -quiet
