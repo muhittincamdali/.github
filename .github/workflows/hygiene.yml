@@ -66,7 +66,8 @@ jobs:
               (r"\bp[u]rif(?:y|ied|ies|ying|ication)\b", "retired slogan"),
           ]
           PROSE = [
-              (r"\bc[u]rsor\b", "tool name"),
+              # The editor only, not the common word (a pagination cursor, a text cursor).
+              (r"\bc[u]rsor(?:\.sh|\.com|\s+(?:ai|ide|editor|agent|composer)\b)|\b(?:made|built|written|generated|coded)\s+(?:with|in|by|using)\s+c[u]rsor\b", "tool name"),
               (r"\b(?:the|is|ranked|rank|number)\s+#1\b|(?<![\w/])#1\s+(?:in|on|for|choice|library|framework|tool|solution)\b", "ranking claim"),
               # Not a CSS or attribute value: "width: 100%;", width="100%", style="height:100%".
               (r"(?<![\w.:=\"'])(?<![:=]\s)100\s?%(?!\s*[;\"'])", "absolute claim"),
